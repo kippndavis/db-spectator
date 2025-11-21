@@ -1,4 +1,4 @@
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, expect
 import random
 import time
 from pathlib import Path
@@ -22,7 +22,6 @@ def get_spectate_matches(page, format):
         except:
             continue  # skip malformed rows
 
-        # only keep matches
         if "MATCH" not in game_type.upper():
             continue
 
@@ -43,7 +42,7 @@ def get_spectate_matches(page, format):
             "index": i,          # index to click later
             "title": title,      # e.g., "PlayerA (...) | PlayerB (...)"
             "game_type": game_type,  # e.g., "MATCH\n(2 out of 3)"
-            "note": note,        # e.g., "(Rated)" or blank
+            "note": note,        # e.g., "(Rated)"
         })
     return results
 
@@ -63,9 +62,7 @@ def login_and_get_to_lobby(page):
         page.fill("input.password_txt", DB_PASSWORD)
         page.click("input.login_btn")
     page.click("#duel_btn")
-    time.sleep(1)
     page.click("#room_btn")
-    time.sleep(1)
     page.click("input.watch_rb")
     page.wait_for_load_state("networkidle")
 
@@ -73,18 +70,44 @@ def click_match_row(page, match):
     scope = f"#{match['fmt']}"
     row = page.locator(f"{scope} .duelbutton.watchbutton").nth(match["index"])
     row.scroll_into_view_if_needed()
-    row.click(timeout=2000)
+    row.click(timeout=1000)
 
-def wait_for_duel_finish(page, max_minutes=60):
+def wait_for_duel_finish(page):
+
+    # Specific locators
+    over_body = page.locator("#over .body_txt")                  # Duel finished modal body
+    quit_btn  = page.locator("#duel_quit_btn")
+    msg_ok    = page.locator("#msg .ok_btn")                     # Lost Connection OK
+    room_btn  = page.locator("#room_btn")
+
+    either_event = page.locator("#over .body_txt:visible, #msg .ok_btn:visible")
+
     while True:
-        # Wait until the modal’s body text is visible
-        page.locator("#over .body_txt").wait_for(state="visible", timeout=max_minutes * 60 * 1000)
-        break
-    time.sleep(5)
-    page.click("#duel_quit_btn", force=True)
+        # Wait until the eventy modal body text is visible
+        try:
+            either_event.wait_for(state="visible", timeout=1000)
+        except PlaywrightTimeoutError:
+            continue # Keep polling
+
+        if msg_ok.is_visible(): # Disconnected; keep trying to reconnect
+            while True:
+                msg_ok.click()
+                page.click("#duel_btn")
+                try:
+                    expect(room_btn).to_be_visible(timeout=10000)
+                    if room_btn.is_visible: # Reconnected
+                        page.click("#room_btn")
+                        page.click("input.watch_rb")
+                        return
+                except:
+                    pass
+
+        if over_body.is_visible():
+            page.wait_for_timeout(5000)
+            page.click("#duel_quit_btn")
+            return
 
 def spectate_loop(page, formats=("gu", "eu")):
-    time.sleep(1)
     matches = []
     for fmt in formats:
         try:
@@ -109,13 +132,13 @@ def main():
             PROFILE_DIR.as_posix(),
             headless=False,
             channel="chromium",
-            viewport={ "width": 1920, "height": 1080 }, # Hardcoding :(
             args=[
                 f"--disable-extensions-except={EXT_DIR.as_posix()}",
                 f"--load-extension={EXT_DIR.as_posix()}",
                 "--start-maximized",
             ],
-            ignore_default_args=["--enable-automation"]  # drop the automation info warning
+            ignore_default_args=["--enable-automation"],  # drop the automation info warning
+            no_viewport=True # This makes the window scalable/resizable
         )
         
         page = context.new_page()
